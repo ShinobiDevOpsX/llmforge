@@ -1,0 +1,196 @@
+# LLMForge local deployment.
+#
+#   ./scripts/setup.sh              # create .env with generated secrets
+#   docker compose up -d --build    # start the stack
+#   ./scripts/download-model.sh     # pull the model (one-time; persisted in a volume)
+#
+# Every published port binds to 127.0.0.1. Ollama is reachable only on the
+# internal network. Images are pinned by tag and digest.
+
+name: llmforge
+
+x-hardening: &hardening
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  networks:
+    - llmforge-net
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  llmforge-api:
+    <<: *hardening
+    build:
+      context: .
+      args:
+        VERSION: ${LLMFORGE_IMAGE_TAG:-0.1.0}
+    image: llmforge:${LLMFORGE_IMAGE_TAG:-0.1.0}
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    # Only gateway settings are passed through - not the whole .env file, so
+    # the API container never sees e.g. the Grafana admin password.
+    environment:
+      LLMFORGE_API_KEYS: ${LLMFORGE_API_KEYS:?set LLMFORGE_API_KEYS in .env (run scripts/setup.sh)}
+      LLMFORGE_OLLAMA_BASE_URL: http://ollama:11434
+      LLMFORGE_ENVIRONMENT: docker-compose
+      LLMFORGE_DEFAULT_MODEL: ${LLMFORGE_DEFAULT_MODEL:-llama3.2:1b}
+      LLMFORGE_ALLOWED_MODELS: ${LLMFORGE_ALLOWED_MODELS:-}
+      LLMFORGE_OLLAMA_KEEP_ALIVE: ${LLMFORGE_OLLAMA_KEEP_ALIVE:-10m}
+      LLMFORGE_LOG_LEVEL: ${LLMFORGE_LOG_LEVEL:-INFO}
+      LLMFORGE_LOG_FORMAT: ${LLMFORGE_LOG_FORMAT:-json}
+      LLMFORGE_AUTH_ENABLED: ${LLMFORGE_AUTH_ENABLED:-true}
+      LLMFORGE_DOCS_ENABLED: ${LLMFORGE_DOCS_ENABLED:-true}
+      LLMFORGE_RATE_LIMIT_ENABLED: ${LLMFORGE_RATE_LIMIT_ENABLED:-true}
+      LLMFORGE_RATE_LIMIT_REQUESTS_PER_MINUTE: ${LLMFORGE_RATE_LIMIT_REQUESTS_PER_MINUTE:-30}
+      LLMFORGE_RATE_LIMIT_BURST: ${LLMFORGE_RATE_LIMIT_BURST:-10}
+      LLMFORGE_MAX_CONCURRENT_GENERATIONS: ${LLMFORGE_MAX_CONCURRENT_GENERATIONS:-2}
+      LLMFORGE_QUEUE_TIMEOUT_SECONDS: ${LLMFORGE_QUEUE_TIMEOUT_SECONDS:-10}
+      LLMFORGE_GENERATION_TIMEOUT_SECONDS: ${LLMFORGE_GENERATION_TIMEOUT_SECONDS:-120}
+      LLMFORGE_MAX_PROMPT_CHARS: ${LLMFORGE_MAX_PROMPT_CHARS:-8000}
+      LLMFORGE_DEFAULT_MAX_TOKENS: ${LLMFORGE_DEFAULT_MAX_TOKENS:-256}
+      LLMFORGE_MAX_OUTPUT_TOKENS: ${LLMFORGE_MAX_OUTPUT_TOKENS:-1024}
+    ports:
+      - "127.0.0.1:${LLMFORGE_API_PORT:-8000}:8000"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status == 200 else 1)"
+      interval: 15s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  ollama:
+    <<: *hardening
+    image: ollama/ollama:0.40.12@sha256:20d1bbfbabe1c97ba4b16301f08a20d8484bcf77047742a3cb71c613d8e12d0b
+    # The upstream image runs as root and stores models under /root/.ollama.
+    # Mitigations: all capabilities dropped, no-new-privileges, read-only
+    # root filesystem, no published ports. See docs/architecture.md.
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_KEEP_ALIVE: ${LLMFORGE_OLLAMA_KEEP_ALIVE:-10m}
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-2}
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+      OLLAMA_NOPRUNE: "false"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: ${OLLAMA_MEMORY_LIMIT:-6g}
+
+  prometheus:
+    <<: *hardening
+    image: prom/prometheus:v3.13.5@sha256:aafa9d694e6a883c02db516d9f6e5b84e14195f49a2a6456a4cca815edda72b9
+    read_only: true
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=2GB
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      llmforge-api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/-/ready"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  grafana:
+    <<: *hardening
+    image: grafana/grafana:13.2.5@sha256:9f7aa1e1e3246aade5792d35a738049f7f32f89cd51d1956cf426a4e86268a84
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env (run scripts/setup.sh)}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      # Grafana 13 otherwise downloads/updates plugins at start-up. That breaks
+      # reproducibility and, on a read-only root FS, unregisters the bundled
+      # Prometheus plugin mid-update. Use only the plugins shipped in the image.
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_PLUGINS_PREINSTALL_AUTO_UPDATE: "false"
+      GF_SECURITY_COOKIE_SAMESITE: strict
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/llmforge-overview.json
+    volumes:
+      # Mount only the subfolders we provide so the image's other (empty)
+      # provisioning directories - plugins/, alerting/ - stay in place.
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 3s
+      start_period: 30s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+networks:
+  llmforge-net:
+    name: llmforge-net
+    driver: bridge
+
+volumes:
+  ollama-models:
+    name: llmforge-ollama-models
+  prometheus-data:
+    name: llmforge-prometheus-data
+  grafana-data:
+    name: llmforge-grafana-data

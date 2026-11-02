@@ -1,0 +1,6 @@
+# Only requirements.txt and app/ are needed in the build context.
+*
+!requirements.txt
+!app/
+**/__pycache__
+**/*.pyc

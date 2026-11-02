@@ -1,0 +1,25 @@
+# Secrets / local configuration
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Generated reports (CI archives these as build artifacts)
+reports/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

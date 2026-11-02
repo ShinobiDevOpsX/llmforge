@@ -1,0 +1,52 @@
+groups:
+  - name: llmforge
+    rules:
+      - alert: LLMForgeAPIUnavailable
+        expr: up{job="llmforge-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: LLMForge API is not being scraped
+          description: Prometheus has failed to scrape the LLMForge API for more than 1 minute.
+
+      - alert: LLMForgeModelUnavailable
+        expr: max by (provider, model) (llmforge_model_availability) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Model {{ $labels.model }} is unavailable"
+          description: >-
+            The runtime ({{ $labels.provider }}) is unreachable or model {{ $labels.model }}
+            has not been pulled. Run scripts/download-model.sh or check the ollama container.
+
+      - alert: LLMForgeHighErrorRate
+        expr: |
+          (
+            sum(rate(llmforge_requests_total{route=~"/v1/.*", status=~"5.."}[5m]))
+            /
+            sum(rate(llmforge_requests_total{route=~"/v1/.*"}[5m]))
+          ) > 0.05
+          and
+          sum(rate(llmforge_requests_total{route=~"/v1/.*"}[5m])) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: LLMForge 5xx error rate above 5%
+          description: "{{ $value | humanizePercentage }} of /v1 requests failed with 5xx over the last 5 minutes."
+
+      - alert: LLMForgeHighInferenceLatency
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, model) (rate(llmforge_inference_duration_seconds_bucket{outcome="success"}[5m]))
+          ) > 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P95 inference latency above 30s for {{ $labels.model }}"
+          description: >-
+            P95 model inference latency is {{ $value | humanizeDuration }}. CPU-only hosts are slow;
+            tune the threshold for your hardware.

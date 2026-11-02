@@ -1,0 +1,42 @@
+[project]
+name = "llmforge"
+version = "0.1.0"
+description = "Deploy, observe, evaluate and operate local LLM applications with DevOps best practices."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12,<3.13"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "RUF", "SIM", "C4", "PT"]
+ignore = ["RUF012"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+# Fast, hermetic unit tests by default; integration tests need the running stack.
+addopts = "-ra --strict-markers -m 'not integration'"
+markers = [
+    "integration: requires a running LLMForge stack with Ollama and the model pulled",
+]
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_also = ["if __name__ == .__main__.:", "raise AssertionError"]
+
+[tool.coverage.xml]
+output = "reports/coverage.xml"
